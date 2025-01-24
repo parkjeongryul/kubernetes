@@ -556,6 +556,59 @@ func runMultipleCPUContainersGuPod(ctx context.Context, f *framework.Framework) 
 	waitForContainerRemoval(ctx, pod.Spec.Containers[1].Name, pod.Name, pod.Namespace)
 }
 
+func runRestartableInitContainerGuPod(ctx context.Context, f *framework.Framework) {
+	var expAllowedCPUsListRegex string
+	var cpuList []int
+	var initCPU, mainCPU int
+	var err error
+
+	initCtnAttrs := []ctnAttribute{
+		{
+			ctnName:       "gu-init-container",
+			cpuRequest:    "1000m",
+			cpuLimit:      "1000m",
+			restartPolicy: &containerRestartPolicyAlways,
+		},
+	}
+
+	pod := makeCPUManagerInitContainersPod("gu-restartable-init-pod", initCtnAttrs)
+	pod = e2epod.NewPodClient(f).CreateSync(ctx, pod)
+
+	initCPU, mainCPU = 1, 2
+	if isHTEnabled() {
+		cpuList = mustParseCPUSet(getCPUSiblingList(0)).List()
+		if cpuList[1] != 1 {
+			initCPU, mainCPU = cpuList[1], 1
+		}
+		if isMultiNUMA() {
+			cpuList = mustParseCPUSet(getCoreSiblingList(0)).List()
+			if len(cpuList) > 1 {
+				mainCPU = cpuList[1]
+			}
+		}
+	} else if isMultiNUMA() {
+		cpuList = mustParseCPUSet(getCoreSiblingList(0)).List()
+		if len(cpuList) > 2 {
+			initCPU, mainCPU = cpuList[1], cpuList[2]
+		}
+	}
+
+	expAllowedCPUsListRegex = fmt.Sprintf("^%d\n$", initCPU)
+	err = e2epod.NewPodClient(f).MatchContainerOutput(ctx, pod.Name, pod.Spec.InitContainers[0].Name, expAllowedCPUsListRegex)
+	framework.ExpectNoError(err, "expected log not found in init container [%s] of pod [%s]",
+		pod.Spec.InitContainers[0].Name, pod.Name)
+
+	expAllowedCPUsListRegex = fmt.Sprintf("^%d\n$", mainCPU)
+	err = e2epod.NewPodClient(f).MatchContainerOutput(ctx, pod.Name, pod.Spec.Containers[0].Name, expAllowedCPUsListRegex)
+	framework.ExpectNoError(err, "expected log not found in main container [%s] of pod [%s]",
+		pod.Spec.Containers[0].Name, pod.Name)
+
+	ginkgo.By("by deleting the pods and waiting for container removal")
+	deletePods(ctx, f, []string{pod.Name})
+	waitForContainerRemoval(ctx, pod.Spec.InitContainers[0].Name, pod.Name, pod.Namespace)
+	waitForContainerRemoval(ctx, pod.Spec.Containers[0].Name, pod.Name, pod.Namespace)
+}
+
 func runMultipleGuPods(ctx context.Context, f *framework.Framework) {
 	var expAllowedCPUsListRegex string
 	var cpuList []int
@@ -664,6 +717,9 @@ func runCPUManagerTests(f *framework.Framework) {
 
 		ginkgo.By("running a Gu pod with multiple containers requesting integer CPUs")
 		runMultipleCPUContainersGuPod(ctx, f)
+
+		ginkgo.By("running a Gu pod with restarable init container requesting integer CPUs")
+		runRestartableInitContainerGuPod(ctx, f)
 
 		ginkgo.By("running multiple Gu pods")
 		runMultipleGuPods(ctx, f)
